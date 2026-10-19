@@ -51,6 +51,11 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
+      - name: Install fixed debug signing key
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+
       - name: Build debug APK
         run: yes | buildozer -v android debug
 
