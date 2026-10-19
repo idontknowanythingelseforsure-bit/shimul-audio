@@ -13,6 +13,9 @@ requirements = python3,kivy==2.3.0,kivymd==1.2.0,pyjnius,android,pillow
 orientation = portrait
 fullscreen = 0
 icon.filename = %(source.dir)s/assets/icon.png
+# Show the app icon while the Python side loads, instead of a black screen.
+presplash.filename = %(source.dir)s/assets/presplash.png
+android.presplash_color = #000000
 
 android.permissions = READ_EXTERNAL_STORAGE,READ_MEDIA_AUDIO,WAKE_LOCK
 android.api = 33

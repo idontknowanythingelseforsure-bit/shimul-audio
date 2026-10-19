@@ -15,7 +15,7 @@ Config.set("graphics", "multisamples", "0")
 
 from kivy.factory import Factory
 from kivy.lang import Builder
-from kivy.clock import Clock
+from kivy.clock import Clock, mainthread
 from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.utils import platform, get_color_from_hex
@@ -613,6 +613,7 @@ class ShimulAudioApp(MDApp):
 
         self.root_widget = Builder.load_string(KV)
         self._build_seconds = time.time() - _t0
+        self._status_event = None
         self.load_saved_playlists()
         Clock.schedule_interval(self.update_progress, 0.2)
         return self.root_widget
@@ -644,14 +645,47 @@ class ShimulAudioApp(MDApp):
     def _report_startup(self, dt):
         """Show how long startup took (temporary diagnostic line)."""
         total = time.time() - _T_IMPORT_START
-        self.startup_info = (
+        self.show_status(
             f"import {_T_IMPORT_END - _T_IMPORT_START:.1f}s | "
             f"build {getattr(self, '_build_seconds', 0):.1f}s | "
             f"ui {getattr(self, '_ui_seconds', 0):.1f}s | "
             f"list {getattr(self, '_first_list_seconds', 0):.1f}s | "
-            f"total {total:.1f}s"
+            f"total {total:.1f}s",
+            seconds=25,
         )
-        Clock.schedule_once(lambda dt: setattr(self, "startup_info", ""), 25)
+
+    def show_status(self, text, seconds=30):
+        """Show a short message on the status line of the list screen."""
+        self.startup_info = text
+        if self._status_event is not None:
+            self._status_event.cancel()
+        self._status_event = Clock.schedule_once(self._clear_status, seconds)
+
+    def _clear_status(self, *args):
+        self._status_event = None
+        self.startup_info = ""
+
+    def diag(self, message):
+        """Write a line to the app's debug log (also visible in logcat)."""
+        line = f"{time.strftime('%H:%M:%S')} {message}"
+        print(f"SHIMUL_DIAG: {line}")
+        try:
+            with open(os.path.join(self.user_data_dir, "shimul_debug.log"),
+                      "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
+
+    def on_resume(self):
+        # Android can hand us a file while we are coming back to the
+        # foreground; make sure it was picked up.
+        if platform == "android":
+            Clock.schedule_once(self._check_pending_intent, 0.5)
+
+    def _check_pending_intent(self, dt):
+        if getattr(self, "_opened_launch_intent", False):
+            return
+        self._check_launch_intent(dt)
 
     # ---------- Persistent JSON Storage for Playlists ----------
     def get_db_path(self):
@@ -993,32 +1027,57 @@ class ShimulAudioApp(MDApp):
         from jnius import autoclass
         return autoclass("org.kivy.android.PythonActivity").mActivity
 
+    def as_uri_string(self, uri):
+        try:
+            return uri.toString()
+        except Exception:
+            return str(uri)
+
     def set_up_open_with_intents(self):
         """Listen for audio files other apps ask us to open."""
+        self._opened_launch_intent = False
         try:
             from android import activity
             activity.bind(on_new_intent=self._on_new_intent)
-        except Exception:
-            pass
-        # The intent that started the app (cold start) is read after the
-        # first screen exists.
-        Clock.schedule_once(self._check_launch_intent, 0.8)
+        except Exception as exc:
+            self.diag(f"intent bind failed: {exc!r}")
 
+        # On a cold start the Activity may not be ready to hand us its intent
+        # on the first frame, so look a few times over the next seconds.
+        for delay in (0.6, 1.5, 3.0, 6.0, 10.0):
+            Clock.schedule_once(self._check_launch_intent, delay)
+
+    @mainthread
     def _on_new_intent(self, intent):
-        # This runs on Java's UI thread, so hand the work to the Kivy loop.
-        Clock.schedule_once(lambda dt: self._handle_open_intent(intent), 0)
+        """Called from Java's UI thread when the app is already running."""
+        self.diag("new intent received")
+        self._handle_open_intent(intent, from_launch=False)
 
     def _check_launch_intent(self, dt):
+        if getattr(self, "_opened_launch_intent", False):
+            return
         try:
             intent = self._android_activity().getIntent()
+        except Exception as exc:
+            self.diag(f"getIntent failed: {exc!r}")
+            return
+        if intent is None:
+            return
+        try:
+            action = intent.getAction()
         except Exception:
             return
-        self._handle_open_intent(intent)
+        if action not in ("android.intent.action.VIEW", "android.intent.action.SEND"):
+            return
+        self._opened_launch_intent = True
+        self.diag(f"launch intent: {action}")
+        self._handle_open_intent(intent, from_launch=True)
 
-    def _handle_open_intent(self, intent):
+    def _handle_open_intent(self, intent, from_launch=False):
         """Play an audio file another app handed to us (ACTION_VIEW / SEND)."""
         if intent is None:
             return
+        uri = None
         try:
             action = intent.getAction()
             uri = intent.getData()
@@ -1026,18 +1085,45 @@ class ShimulAudioApp(MDApp):
                 from jnius import cast
                 uri = cast("android.net.Uri",
                            intent.getParcelableExtra("android.intent.extra.STREAM"))
-        except Exception:
+        except Exception as exc:
+            self.diag(f"intent read failed: {exc!r}")
             return
         if uri is None:
+            self.diag("intent had no file URI")
             return
+
+        uri_text = self.as_uri_string(uri)
+        self.diag(f"open request: {uri_text}")
+        self.show_status(f"Opening: {uri_text[:60]}")
+        # Resolving a content:// URI can copy a whole song, so keep it off the
+        # UI thread.
+        threading.Thread(
+            target=self._resolve_and_play, args=(uri,), daemon=True
+        ).start()
+
+    def _resolve_and_play(self, uri):
         try:
             path = self._uri_to_path(uri)
-        except Exception:
+        except Exception as exc:
+            self.diag(f"resolve failed: {exc!r}")
             path = None
+        self._finish_open_uri(uri, path)
+
+    @mainthread
+    def _finish_open_uri(self, uri, path):
         if not path or not os.path.isfile(path):
+            self.diag("could not turn the URI into a playable file")
+            self.show_status("Sorry, this file could not be opened")
             toast("Sorry, this file could not be opened")
             return
-        self.play_external_file(path)
+        self.diag(f"resolved to: {path}")
+        self.show_status(f"Playing: {os.path.basename(path)}")
+        toast(f"Playing: {os.path.basename(path)}")
+        try:
+            self.play_external_file(path)
+        except Exception as exc:
+            self.diag(f"play failed: {exc!r}")
+            toast("Sorry, this file could not be played")
 
     def _uri_to_path(self, uri):
         """Turn a file:// or content:// URI into a path we can play."""
@@ -1046,7 +1132,7 @@ class ShimulAudioApp(MDApp):
         except Exception:
             return None
 
-        if scheme in (None, "file"):
+        if scheme in (None, "", "file"):
             path = uri.getPath()
             if path and os.path.isfile(path):
                 return path
@@ -1055,8 +1141,7 @@ class ShimulAudioApp(MDApp):
         if scheme != "content":
             return None
 
-        # Video/audio providers from the media store still expose the real
-        # path through the "_data" column.
+        # Media store URIs usually still expose the real path in "_data".
         try:
             resolver = self._android_activity().getContentResolver()
             cursor = resolver.query(uri, None, None, None, None)
@@ -1070,8 +1155,8 @@ class ShimulAudioApp(MDApp):
                                 return real
                 finally:
                     cursor.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.diag(f"query failed: {exc!r}")
 
         # Otherwise copy the file into our own storage once.
         return self._copy_uri_to_storage(uri)
@@ -1094,7 +1179,8 @@ class ShimulAudioApp(MDApp):
                         break
                     out.write(chunk)
             return dest
-        except Exception:
+        except Exception as exc:
+            self.diag(f"copy failed: {exc!r}")
             return None
         finally:
             if src_fd >= 0:
