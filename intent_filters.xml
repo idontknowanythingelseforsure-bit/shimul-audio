@@ -1,0 +1,23 @@
+<!-- Intent filters injected inside the <activity> tag of AndroidManifest.xml
+     (buildozer.spec -> android.manifest.intent_filters).
+
+     This makes Android offer "Shimul Audio" in the "Open with" list whenever
+     the user taps an audio file in a file manager, WhatsApp, a browser, etc. -->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <category android:name="android.intent.category.OPENABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="audio/*" />
+</intent-filter>
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <category android:name="android.intent.category.OPENABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="application/ogg" />
+</intent-filter>

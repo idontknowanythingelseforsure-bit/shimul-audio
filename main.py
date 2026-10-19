@@ -627,6 +627,8 @@ class ShimulAudioApp(MDApp):
 
         first_run = not getattr(self, "_db_existed", False)
         if platform == "android":
+            # Accept audio files sent by other apps ("Open with").
+            self.set_up_open_with_intents()
             try:
                 from android.permissions import request_permissions, Permission
                 request_permissions(
@@ -985,6 +987,160 @@ class ShimulAudioApp(MDApp):
             self.add_to_playlist(files)
         elif os.path.isfile(path):
             self.add_to_playlist([path])
+
+    # ---------- "Open with" support: play a file sent by another app ----------
+    def _android_activity(self):
+        from jnius import autoclass
+        return autoclass("org.kivy.android.PythonActivity").mActivity
+
+    def set_up_open_with_intents(self):
+        """Listen for audio files other apps ask us to open."""
+        try:
+            from android import activity
+            activity.bind(on_new_intent=self._on_new_intent)
+        except Exception:
+            pass
+        # The intent that started the app (cold start) is read after the
+        # first screen exists.
+        Clock.schedule_once(self._check_launch_intent, 0.8)
+
+    def _on_new_intent(self, intent):
+        # This runs on Java's UI thread, so hand the work to the Kivy loop.
+        Clock.schedule_once(lambda dt: self._handle_open_intent(intent), 0)
+
+    def _check_launch_intent(self, dt):
+        try:
+            intent = self._android_activity().getIntent()
+        except Exception:
+            return
+        self._handle_open_intent(intent)
+
+    def _handle_open_intent(self, intent):
+        """Play an audio file another app handed to us (ACTION_VIEW / SEND)."""
+        if intent is None:
+            return
+        try:
+            action = intent.getAction()
+            uri = intent.getData()
+            if uri is None and action == "android.intent.action.SEND":
+                from jnius import cast
+                uri = cast("android.net.Uri",
+                           intent.getParcelableExtra("android.intent.extra.STREAM"))
+        except Exception:
+            return
+        if uri is None:
+            return
+        try:
+            path = self._uri_to_path(uri)
+        except Exception:
+            path = None
+        if not path or not os.path.isfile(path):
+            toast("Sorry, this file could not be opened")
+            return
+        self.play_external_file(path)
+
+    def _uri_to_path(self, uri):
+        """Turn a file:// or content:// URI into a path we can play."""
+        try:
+            scheme = uri.getScheme()
+        except Exception:
+            return None
+
+        if scheme in (None, "file"):
+            path = uri.getPath()
+            if path and os.path.isfile(path):
+                return path
+            return None
+
+        if scheme != "content":
+            return None
+
+        # Video/audio providers from the media store still expose the real
+        # path through the "_data" column.
+        try:
+            resolver = self._android_activity().getContentResolver()
+            cursor = resolver.query(uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    if cursor.moveToFirst():
+                        idx = cursor.getColumnIndex("_data")
+                        if idx >= 0:
+                            real = cursor.getString(idx)
+                            if real and os.path.isfile(real):
+                                return real
+                finally:
+                    cursor.close()
+        except Exception:
+            pass
+
+        # Otherwise copy the file into our own storage once.
+        return self._copy_uri_to_storage(uri)
+
+    def _copy_uri_to_storage(self, uri):
+        src_fd = -1
+        try:
+            resolver = self._android_activity().getContentResolver()
+            pfd = resolver.openFileDescriptor(uri, "r")
+            if pfd is None:
+                return None
+            src_fd = pfd.detachFd()
+            name = self._uri_display_name(uri) or "opened_track"
+            safe = "".join(c for c in name if c.isalnum() or c in "._- ").strip()
+            dest = os.path.join(self.user_data_dir, "opened_" + (safe or "track.mp3"))
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = os.read(src_fd, 262144)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            return dest
+        except Exception:
+            return None
+        finally:
+            if src_fd >= 0:
+                try:
+                    os.close(src_fd)
+                except Exception:
+                    pass
+
+    def _uri_display_name(self, uri):
+        try:
+            resolver = self._android_activity().getContentResolver()
+            cursor = resolver.query(uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    if cursor.moveToFirst():
+                        idx = cursor.getColumnIndex("_display_name")
+                        if idx >= 0:
+                            return cursor.getString(idx) or ""
+                finally:
+                    cursor.close()
+        except Exception:
+            pass
+        try:
+            return os.path.basename(uri.getLastPathSegment() or "")
+        except Exception:
+            return ""
+
+    def play_external_file(self, path):
+        """Play a file that was opened from another app and remember it."""
+        pl_name = "Recently added"
+        pl = self.playlists_db.setdefault(pl_name, [])
+        if path not in pl:
+            pl.insert(0, path)
+            self.save_playlists()
+
+        self.active_playlist_name = pl_name
+        self.showing_overview = False
+        self.playlist = list(pl)
+        self.refresh_main_list()
+
+        try:
+            index = self.playlist.index(path)
+        except ValueError:
+            index = 0
+        self.switch_screen("now_playing")
+        self.load_track(index, autoplay=True)
 
     def scan_music_folder(self):
         """Look for audio files in the Music folder on a worker thread.

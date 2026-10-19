@@ -3,7 +3,7 @@ title = Shimul Audio
 package.name = shimulaudio
 package.domain = com.shimul
 source.dir = .
-source.include_exts = py,kv,png,jpg,atlas,json
+source.include_exts = py,kv,png,jpg,atlas,json,xml
 source.exclude_dirs = .git,.github,build,dist,bin,__pycache__,.venv
 version = 1.0.0
 
@@ -20,6 +20,13 @@ android.minapi = 21
 android.ndk = 25b
 android.accept_sdk_license = True
 android.archs = arm64-v8a
+
+# Let Android offer "Shimul Audio" in the "Open with" list when the user taps
+# an audio file in another app (file manager, WhatsApp, browser, ...).
+android.manifest.intent_filters = intent_filters.xml
+# Reuse the running activity so a new file arrives via onNewIntent instead of
+# starting a second copy of the app.
+android.manifest.launch_mode = singleTop
 
 # Pin python-for-android to the last release that builds Python 3.11.
 # master/v2026.05.09 build Python 3.14, whose _PyLong_AsByteArray signature
