@@ -55,6 +55,7 @@ from kivy.lang import Builder
 from kivy.clock import Clock, mainthread
 from kivy.metrics import dp
 from kivy.core.window import Window
+early_log("kivy core imported (window created)")
 from kivy.utils import platform, get_color_from_hex
 from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
@@ -68,6 +69,7 @@ from kivymd.uix.list import (
 )
 from kivymd.toast import toast
 
+early_log("kivy + kivymd imported")
 _T_IMPORT_END = time.time()
 
 # ---------- Cross-Platform Audio Engine Setup ----------
@@ -88,6 +90,8 @@ else:
         USE_PYGAME = True
     except Exception:
         from kivy.core.audio import SoundLoader
+
+early_log("audio engine ready (android_player=%s, pygame=%s)" % (USE_ANDROID_PLAYER, USE_PYGAME))
 
 KV = '''
 #:import hex kivy.utils.get_color_from_hex
