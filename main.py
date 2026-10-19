@@ -9,9 +9,46 @@ _T_IMPORT_START = time.time()
 import random
 import threading
 
+# ---------- Startup tracing ----------
+# Written to the app's own external folder, which needs no permission:
+#   /storage/emulated/0/Android/data/com.shimul.shimulaudio/files/
+# Used to find out how far startup got when the phone refuses to open the app.
+_ANDROID_PKG = "com.shimul.shimulaudio"
+_LOG_PATHS = []
+
+
+def _log_paths():
+    if _LOG_PATHS:
+        return _LOG_PATHS
+    private = os.environ.get("ANDROID_PRIVATE")
+    if private:
+        _LOG_PATHS.append(os.path.join(private, "shimul_audio_log.txt"))
+        # The app's own external folder; readable by file managers without
+        # any permission on our side.
+        _LOG_PATHS.append(
+            "/storage/emulated/0/Android/data/{}/files/shimul_audio_log.txt".format(_ANDROID_PKG)
+        )
+    return _LOG_PATHS
+
+
+def early_log(message):
+    """Best-effort startup trace: never raises, never blocks the app."""
+    line = "{} {}".format(time.strftime("%H:%M:%S"), message)
+    print("SHIMUL_START: " + line)
+    for path in _log_paths():
+        try:
+            folder = os.path.dirname(path)
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
+
+
+early_log("python entry point reached")
+
 from kivy.config import Config
-# Cheaper first frame on low-end phone GPUs (no MSAA).
-Config.set("graphics", "multisamples", "0")
 
 from kivy.factory import Factory
 from kivy.lang import Builder
@@ -580,6 +617,7 @@ class ShimulAudioApp(MDApp):
 
     def build(self):
         _t0 = time.time()
+        early_log("build() started")
         self.title = "Shimul Audio"
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "LightGreen"
@@ -616,15 +654,18 @@ class ShimulAudioApp(MDApp):
         self._status_event = None
         self.load_saved_playlists()
         Clock.schedule_interval(self.update_progress, 0.2)
+        early_log("build() finished in %.2fs" % (time.time() - _t0))
         return self.root_widget
 
     def on_start(self):
         # Draw the saved playlist right away; never rebuild the library on
         # startup. The Music folder is only scanned once, on a fresh install
         # (or when the user taps the search button).
+        early_log("on_start() begin")
         self.refresh_main_list()
         self._ui_seconds = time.time() - _T_IMPORT_START
         Clock.schedule_once(self._report_startup, 0.1)
+        early_log("on_start() list built")
 
         first_run = not getattr(self, "_db_existed", False)
         if platform == "android":
@@ -667,14 +708,8 @@ class ShimulAudioApp(MDApp):
 
     def diag(self, message):
         """Write a line to the app's debug log (also visible in logcat)."""
-        line = f"{time.strftime('%H:%M:%S')} {message}"
-        print(f"SHIMUL_DIAG: {line}")
-        try:
-            with open(os.path.join(self.user_data_dir, "shimul_debug.log"),
-                      "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-        except Exception:
-            pass
+        print(f"SHIMUL_DIAG: {message}")
+        early_log("diag: " + str(message))
 
     def on_resume(self):
         # Android can hand us a file while we are coming back to the
@@ -1567,5 +1602,51 @@ class ShimulAudioApp(MDApp):
         toast(text)
 
 
+def _emergency_report(error_text):
+    """Make a startup crash visible on the phone: file + on-screen text."""
+    early_log("STARTUP FAILED:\n" + error_text[-3000:])
+    for path in _log_paths():
+        try:
+            folder = os.path.dirname(path)
+            if folder and not os.path.isdir(folder):
+                os.makedirs(folder, exist_ok=True)
+            with open(path.replace("shimul_audio_log.txt", "shimul_crash.txt"),
+                      "w", encoding="utf-8") as fh:
+                fh.write(error_text)
+        except Exception:
+            pass
+    try:
+        from kivy.uix.label import Label
+        label = Label(
+            text="Shimul Audio failed to start:\n\n" + error_text[-4000:],
+            font_size="13sp",
+            halign="left",
+            valign="top",
+            size_hint_y=None,
+            text_size=(Window.width - dp(16), None),
+        )
+        label.bind(texture_size=lambda inst, val: setattr(inst, "height", val[1]))
+        view = ScrollView()
+        view.add_widget(label)
+        return view
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
-    ShimulAudioApp().run()
+    try:
+        early_log("creating the application")
+        ShimulAudioApp().run()
+    except Exception:
+        import traceback
+        _trace = traceback.format_exc()
+        print(_trace)
+        _widget = _emergency_report(_trace)
+        if _widget is not None:
+            try:
+                from kivy.base import runTouchApp
+                early_log("showing the crash screen")
+                runTouchApp(_widget)
+            except Exception:
+                pass
+        raise
