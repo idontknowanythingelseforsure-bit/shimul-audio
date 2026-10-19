@@ -51,13 +51,24 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
-      - name: Install fixed debug signing key
-        run: |
-          mkdir -p ~/.android
-          cp debug.keystore ~/.android/debug.keystore
-
       - name: Build debug APK
         run: yes | buildozer -v android debug
+
+      - name: Re-sign APK with fixed key
+        run: |
+          BUILD_TOOLS=$(ls -d "$HOME"/.buildozer/android/platform/android-sdk/build-tools/* | sort -V | tail -n 1)
+          echo "Using build-tools: $BUILD_TOOLS"
+          APK=$(ls bin/*.apk | head -n 1)
+          echo "Signing: $APK"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks debug.keystore \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "${APK%.apk}-signed.apk" \
+            "$APK"
+          mv -f "${APK%.apk}-signed.apk" "$APK"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
