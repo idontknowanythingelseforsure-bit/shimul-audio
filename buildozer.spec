@@ -21,6 +21,11 @@ android.ndk = 25b
 android.accept_sdk_license = True
 android.archs = arm64-v8a
 
+# Pin python-for-android to the last release that builds Python 3.11.
+# master/v2026.05.09 build Python 3.14, whose _PyLong_AsByteArray signature
+# breaks Kivy 2.3.0's generated C code (expected 6 args, have 5).
+p4a.branch = v2024.01.21
+
 [buildozer]
 log_level = 2
 warn_on_root = 1

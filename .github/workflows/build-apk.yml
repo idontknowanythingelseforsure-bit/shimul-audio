@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    paths:
+      - "buildozer.spec"
+      - "main.py"
+      - "assets/**"
+      - ".github/workflows/build-apk.yml"
 
 jobs:
   apk:
@@ -36,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ runner.os }}-v1
+          key: buildozer-${{ runner.os }}-v2
           restore-keys: |
             buildozer-${{ runner.os }}-
 
