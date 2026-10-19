@@ -1,0 +1,17 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Build output
+build/
+dist/
+bin/
+.buildozer/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
