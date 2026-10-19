@@ -14,6 +14,13 @@ jobs:
   exe:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      # Collecting kivymd makes PyInstaller *import* KivyMD, which imports
+      # kivy.core.window. CI runners only expose OpenGL 1.1, so Kivy raises a
+      # MODAL "Kivy Fatal Error" dialog and the build hangs forever. The mock
+      # backend skips the OpenGL requirement at build time only (it is not
+      # baked into the produced exe).
+      KIVY_GL_BACKEND: mock
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,6 +36,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Build executable
+        timeout-minutes: 10
         run: python -m PyInstaller --noconfirm --clean --onefile --noconsole --name "Shimul Audio" --icon "assets/icon.ico" --collect-all kivymd main.py
 
       - name: Upload EXE
