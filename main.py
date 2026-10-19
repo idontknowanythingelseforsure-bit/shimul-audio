@@ -2,14 +2,25 @@ import os
 import json
 import time
 import random
+import threading
 
 from kivy.lang import Builder
 from kivy.clock import Clock
-from kivy.utils import platform
+from kivy.metrics import dp
+from kivy.core.window import Window
+from kivy.utils import platform, get_color_from_hex
+from kivy.uix.modalview import ModalView
+from kivy.uix.scrollview import ScrollView
 from kivy.properties import StringProperty, NumericProperty, BooleanProperty
 from kivymd.app import MDApp
-from kivymd.uix.menu import MDDropdownMenu
-from kivymd.uix.list import TwoLineAvatarIconListItem, IconLeftWidget, IconRightWidget
+from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.uix.card import MDCard
+from kivymd.uix.list import (
+    OneLineListItem,
+    TwoLineAvatarIconListItem,
+    IconLeftWidget,
+    IconRightWidget,
+)
 from kivymd.uix.filemanager import MDFileManager
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.button import MDFlatButton, MDRaisedButton
@@ -144,7 +155,7 @@ MDScreen:
                         md_bg_color: hex("#1c1c1c")
                         specific_text_color: hex("#ffffff")
                         left_action_items: [["arrow-left", lambda x: app.switch_screen("playlists")], ["playlist-play", lambda x: app.open_playlists_from_player()]]
-                        right_action_items: [["playlist-plus", lambda x: app.add_current_track_to_playlist_menu(x)], ["tune-vertical", lambda x: app.msg("Equalizer")], ["dots-vertical", lambda x: app.open_menu(x)]]
+                        right_action_items: [["playlist-plus", lambda x: app.add_current_track_to_playlist_menu(x)], ["dots-vertical", lambda x: app.open_menu(x)]]
                         elevation: 2
 
                     # Giant Metallic CD Artwork Area
@@ -196,24 +207,27 @@ MDScreen:
                             on_release: app.add_current_track_to_playlist_menu(self)
 
                     # Playback Controls Row (With -10s / +10s seek buttons + Prev/Next)
+                    # Every button shares the row width proportionally so all
+                    # seven controls stay on screen on narrow phones.
                     MDBoxLayout:
                         size_hint_y: None
-                        height: "95dp"
-                        padding: ["12dp", "8dp"]
-                        spacing: "6dp"
+                        height: "92dp"
+                        padding: ["4dp", "6dp"]
+                        spacing: "2dp"
 
                         MDIconButton:
                             icon: "shuffle-variant"
+                            icon_size: "24sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#64dd17") if app.shuffle else hex("#6b7280")
                             pos_hint: {"center_y": .5}
                             on_release: app.toggle_shuffle()
 
-                        Widget:
-
                         MDIconButton:
                             icon: "skip-previous"
-                            icon_size: "38sp"
+                            icon_size: "30sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#e5e7eb")
                             pos_hint: {"center_y": .5}
@@ -221,7 +235,8 @@ MDScreen:
 
                         MDIconButton:
                             icon: "rewind-10"
-                            icon_size: "32sp"
+                            icon_size: "26sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#9ca3af")
                             pos_hint: {"center_y": .5}
@@ -229,7 +244,8 @@ MDScreen:
 
                         MDIconButton:
                             icon: "pause-circle" if app.is_playing else "play-circle"
-                            icon_size: "74sp"
+                            icon_size: "52sp"
+                            size_hint_x: 1.5
                             theme_text_color: "Custom"
                             text_color: hex("#64dd17")
                             pos_hint: {"center_y": .5}
@@ -237,7 +253,8 @@ MDScreen:
 
                         MDIconButton:
                             icon: "fast-forward-10"
-                            icon_size: "32sp"
+                            icon_size: "26sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#9ca3af")
                             pos_hint: {"center_y": .5}
@@ -245,16 +262,17 @@ MDScreen:
 
                         MDIconButton:
                             icon: "skip-next"
-                            icon_size: "38sp"
+                            icon_size: "30sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#e5e7eb")
                             pos_hint: {"center_y": .5}
                             on_release: app.next_track()
 
-                        Widget:
-
                         MDIconButton:
                             icon: "repeat"
+                            icon_size: "24sp"
+                            size_hint_x: 1
                             theme_text_color: "Custom"
                             text_color: hex("#64dd17") if app.repeat else hex("#6b7280")
                             pos_hint: {"center_y": .5}
@@ -393,6 +411,69 @@ MDScreen:
 '''
 
 
+class OptionSheet(ModalView):
+    """Bottom-sheet menu.
+
+    Used instead of MDDropdownMenu: in KivyMD 1.2 the dropdown measures its
+    growth before it knows its own width/height, so menus opened near the
+    right edge (or with several items) end up partly off-screen. A sheet
+    anchored to the bottom always fits.
+    """
+
+    def __init__(self, items, **kwargs):
+        super().__init__(**kwargs)
+        self.size_hint = (1, 1)
+        self.anchor_y = "bottom"
+        self.background_color = (0, 0, 0, 0.5)
+        self.auto_dismiss = True
+        self._dismissed = False
+
+        item_h = dp(52)
+        sheet_h = min(item_h * len(items) + dp(16), Window.height * 0.7)
+
+        card = MDCard(
+            orientation="vertical",
+            size_hint=(1, None),
+            height=sheet_h,
+            radius=[dp(18), dp(18), 0, 0],
+            md_bg_color=get_color_from_hex("#2a2a2a"),
+            padding=[0, dp(8), 0, dp(8)],
+            elevation=12,
+        )
+
+        box = MDBoxLayout(
+            orientation="vertical",
+            size_hint_y=None,
+            height=item_h * len(items),
+        )
+        for data in items:
+            item = OneLineListItem(
+                text=str(data.get("text", "")),
+                size_hint_y=None,
+                height=item_h,
+            )
+            item.bind(on_release=self._make_handler(data.get("on_release")))
+            box.add_widget(item)
+
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        scroll.add_widget(box)
+        card.add_widget(scroll)
+        self.add_widget(card)
+
+    def _make_handler(self, callback):
+        def handler(*args):
+            self.dismiss()
+            if callback:
+                Clock.schedule_once(lambda dt: callback(), 0)
+        return handler
+
+    def dismiss(self, *args, **kwargs):
+        if self._dismissed:
+            return
+        self._dismissed = True
+        super().dismiss(*args, **kwargs)
+
+
 class ShimulAudioApp(MDApp):
     view_title = StringProperty("Playlists")
     current_title = StringProperty("No track loaded")
@@ -434,11 +515,9 @@ class ShimulAudioApp(MDApp):
         self.start_time = 0.0
         self.start_offset = 0.0
 
-        self.file_manager = MDFileManager(
-            exit_manager=self.close_file_manager,
-            select_path=self.select_path,
-            ext=[".mp3", ".wav", ".ogg", ".flac"]
-        )
+        # The file manager builds a fairly large widget tree; create it only
+        # when the user actually opens it so startup stays quick.
+        self.file_manager = None
 
         self.root_widget = Builder.load_string(KV)
         self.load_saved_playlists()
@@ -446,14 +525,20 @@ class ShimulAudioApp(MDApp):
         return self.root_widget
 
     def on_start(self):
-        if platform == "android":
-            from android.permissions import request_permissions, Permission
-            request_permissions([
-                Permission.READ_EXTERNAL_STORAGE,
-                Permission.READ_MEDIA_AUDIO
-            ])
-        self.scan_music_folder()
+        # Draw the saved playlist right away, then look for new songs in the
+        # background. Nothing here is allowed to block the first frame.
         self.refresh_main_list()
+        if platform == "android":
+            try:
+                from android.permissions import request_permissions, Permission
+                request_permissions(
+                    [Permission.READ_EXTERNAL_STORAGE, Permission.READ_MEDIA_AUDIO],
+                    lambda perms, grants: self.scan_music_folder(),
+                )
+            except Exception:
+                Clock.schedule_once(lambda dt: self.scan_music_folder(), 1.0)
+        else:
+            Clock.schedule_once(lambda dt: self.scan_music_folder(), 0.3)
 
     # ---------- Persistent JSON Storage for Playlists ----------
     def get_db_path(self):
@@ -467,8 +552,12 @@ class ShimulAudioApp(MDApp):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, dict):
+                        # Keep the stored paths as-is: checking every file
+                        # with os.path.isfile() on startup is slow on
+                        # Android's FUSE storage and delayed the UI.
                         for k, v in data.items():
-                            self.playlists_db[k] = [p for p in v if os.path.isfile(p)]
+                            if isinstance(v, list):
+                                self.playlists_db[k] = list(v)
             except Exception:
                 pass
         self.playlist = list(self.playlists_db.get(self.active_playlist_name, []))
@@ -544,19 +633,35 @@ class ShimulAudioApp(MDApp):
         container = self.root_widget.ids.playlist_container
         container.clear_widgets()
 
-        for idx, p in enumerate(self.playlist):
-            item = TwoLineAvatarIconListItem(
-                text=os.path.basename(p),
-                secondary_text=f"Playlist: {self.active_playlist_name}  •  Tap 3-dots to add/manage",
-                on_release=lambda x, i=idx: self.on_track_selected(i)
-            )
-            item.add_widget(IconLeftWidget(icon="music-note"))
-            right_btn = IconRightWidget(
-                icon="dots-vertical",
-                on_release=lambda btn, path=p, i=idx: self.open_track_item_menu(btn, path, i)
-            )
-            item.add_widget(right_btn)
-            container.add_widget(item)
+        # Add the rows in small batches. Building hundreds of list items at
+        # once froze the app for several seconds on phones.
+        self._list_generation = getattr(self, "_list_generation", 0) + 1
+        generation = self._list_generation
+        tracks = list(self.playlist)
+        playlist_name = self.active_playlist_name
+
+        def add_chunk(start=0):
+            if generation != self._list_generation:
+                return
+            end = min(start + 25, len(tracks))
+            for idx in range(start, end):
+                p = tracks[idx]
+                item = TwoLineAvatarIconListItem(
+                    text=os.path.basename(p),
+                    secondary_text=f"Playlist: {playlist_name}  •  Tap 3-dots to add/manage",
+                    on_release=lambda x, i=idx: self.on_track_selected(i)
+                )
+                item.add_widget(IconLeftWidget(icon="music-note"))
+                right_btn = IconRightWidget(
+                    icon="dots-vertical",
+                    on_release=lambda btn, path=p, i=idx: self.open_track_item_menu(btn, path, i)
+                )
+                item.add_widget(right_btn)
+                container.add_widget(item)
+            if end < len(tracks):
+                Clock.schedule_once(lambda dt: add_chunk(end), 0)
+
+        add_chunk()
 
     # ---------- Create / Manage Playlists Dialogs & Menus ----------
     def show_create_playlist_dialog(self, track_to_add=None):
@@ -598,6 +703,13 @@ class ShimulAudioApp(MDApp):
         self.save_playlists()
         self.refresh_main_list()
 
+    # ---------- Dropdown helper ----------
+    def open_dropdown(self, caller, items, width_mult=4):
+        """Show options in a bottom sheet that always stays on screen."""
+        menu = OptionSheet(items)
+        menu.open()
+        return menu
+
     def open_playlist_folder_menu(self, caller, pl_name):
         options = [
             ("Play this playlist", lambda: self.play_entire_playlist(pl_name)),
@@ -614,8 +726,7 @@ class ShimulAudioApp(MDApp):
                 "on_release": lambda act=action: (self.track_menu.dismiss(), act()),
             } for label, action in options
         ]
-        self.track_menu = MDDropdownMenu(caller=caller, items=menu_items, width_mult=4)
-        self.track_menu.open()
+        self.track_menu = self.open_dropdown(caller, menu_items)
 
     def play_entire_playlist(self, pl_name):
         self.open_playlist_by_name(pl_name)
@@ -671,8 +782,7 @@ class ShimulAudioApp(MDApp):
             "on_release": lambda: (self.track_menu.dismiss(), self.remove_song_from_active(index)),
         })
 
-        self.track_menu = MDDropdownMenu(caller=caller, items=menu_items, width_mult=4)
-        self.track_menu.open()
+        self.track_menu = self.open_dropdown(caller, menu_items)
 
     def add_current_track_to_playlist_menu(self, caller):
         if not (0 <= self.current_index < len(self.playlist)):
@@ -734,8 +844,7 @@ class ShimulAudioApp(MDApp):
                 "on_release": lambda x=item: self.handle_menu_click(x),
             } for item in options
         ]
-        self.menu = MDDropdownMenu(caller=caller, items=menu_items, width_mult=4)
-        self.menu.open()
+        self.menu = self.open_dropdown(caller, menu_items)
 
     def handle_menu_click(self, option):
         self.menu.dismiss()
@@ -760,11 +869,18 @@ class ShimulAudioApp(MDApp):
 
     # ---------- File & Folder Loading ----------
     def open_file_manager(self):
+        if self.file_manager is None:
+            self.file_manager = MDFileManager(
+                exit_manager=self.close_file_manager,
+                select_path=self.select_path,
+                ext=[".mp3", ".wav", ".ogg", ".flac"]
+            )
         start_dir = "/storage/emulated/0" if platform == "android" else os.path.expanduser("~")
         self.file_manager.show(start_dir)
 
     def close_file_manager(self, *args):
-        self.file_manager.close()
+        if self.file_manager:
+            self.file_manager.close()
 
     def select_path(self, path):
         self.close_file_manager()
@@ -778,15 +894,55 @@ class ShimulAudioApp(MDApp):
             self.add_to_playlist([path])
 
     def scan_music_folder(self):
-        music_dir = "/storage/emulated/0/Music" if platform == "android" else os.path.expanduser("~/Music")
-        if os.path.exists(music_dir):
+        """Look for audio files in the Music folder on a worker thread.
+
+        Walking the folder over Android's FUSE layer can take a long time,
+        so the UI list is built from the saved data first and the scan result
+        is applied when it finishes.
+        """
+        target_pl = self.active_playlist_name
+
+        def worker():
+            music_dir = "/storage/emulated/0/Music" if platform == "android" else os.path.expanduser("~/Music")
             found = []
-            for root_dir, _, files in os.walk(music_dir):
-                for f in sorted(files):
-                    if f.lower().endswith((".mp3", ".wav", ".ogg", ".flac")):
-                        found.append(os.path.join(root_dir, f))
-            if found:
-                self.add_to_playlist(found)
+            if os.path.exists(music_dir):
+                for root_dir, dirs, files in os.walk(music_dir):
+                    # Skip hidden/system folders.
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for f in sorted(files):
+                        if f.lower().endswith((".mp3", ".wav", ".ogg", ".flac")):
+                            found.append(os.path.join(root_dir, f))
+            Clock.schedule_once(lambda dt: self._apply_scan(found, target_pl), 0)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_scan(self, found, target_pl):
+        """Merge a finished scan into the playlists (runs on the UI thread)."""
+        if not found:
+            return
+
+        if target_pl not in self.playlists_db:
+            self.playlists_db[target_pl] = []
+        recent = self.playlists_db.setdefault("Recently added", [])
+
+        added = 0
+        for p in found:
+            if p not in self.playlists_db[target_pl]:
+                self.playlists_db[target_pl].append(p)
+                added += 1
+            if p not in recent:
+                recent.append(p)
+
+        if added == 0:
+            return
+
+        self.save_playlists()
+        if target_pl == self.active_playlist_name and not self.showing_overview:
+            self.playlist = list(self.playlists_db[target_pl])
+            if self.current_index < 0:
+                self.load_track(0, autoplay=False)
+            self.refresh_main_list()
+        toast(f"Added {added} song(s) from Music")
 
     def add_to_playlist(self, paths):
         was_empty = len(self.playlist) == 0
