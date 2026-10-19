@@ -1,9 +1,19 @@
 import os
 import json
 import time
+
+# Timestamp taken before Kivy/KivyMD are imported, used by the temporary
+# startup report. Safe to remove once startup work is done.
+_T_IMPORT_START = time.time()
+
 import random
 import threading
 
+from kivy.config import Config
+# Cheaper first frame on low-end phone GPUs (no MSAA).
+Config.set("graphics", "multisamples", "0")
+
+from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.clock import Clock
 from kivy.metrics import dp
@@ -13,19 +23,15 @@ from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
 from kivy.properties import StringProperty, NumericProperty, BooleanProperty
 from kivymd.app import MDApp
-from kivymd.uix.boxlayout import MDBoxLayout
-from kivymd.uix.card import MDCard
 from kivymd.uix.list import (
     OneLineListItem,
     TwoLineAvatarIconListItem,
     IconLeftWidget,
     IconRightWidget,
 )
-from kivymd.uix.filemanager import MDFileManager
-from kivymd.uix.dialog import MDDialog
-from kivymd.uix.button import MDFlatButton, MDRaisedButton
-from kivymd.uix.textfield import MDTextField
 from kivymd.toast import toast
+
+_T_IMPORT_END = time.time()
 
 # ---------- Cross-Platform Audio Engine Setup ----------
 USE_PYGAME = False
@@ -90,10 +96,26 @@ MDScreen:
                         right_action_items: [["plus-box-multiple", lambda x: app.show_create_playlist_dialog()], ["magnify", lambda x: app.scan_music_folder()], ["dots-vertical", lambda x: app.open_menu(x)]]
                         elevation: 2
 
-                    ScrollView:
-                        MDList:
-                            id: playlist_container
-                            padding: "0dp"
+                    RecycleView:
+                        id: playlist_rv
+                        viewclass: "TrackRow"
+                        key_viewclass: "viewclass"
+                        RecycleBoxLayout:
+                            default_size: None, dp(64)
+                            default_size_hint: 1, None
+                            size_hint_y: None
+                            height: self.minimum_height
+                            orientation: "vertical"
+
+                    MDLabel:
+                        id: startup_info
+                        text: app.startup_info
+                        font_style: "Caption"
+                        theme_text_color: "Custom"
+                        text_color: hex("#ffb300")
+                        size_hint_y: None
+                        height: "16dp" if app.startup_info else "0dp"
+                        halign: "center"
 
                     # Bottom Mini-Player Bar
                     MDCard:
@@ -422,6 +444,9 @@ class OptionSheet(ModalView):
 
     def __init__(self, items, **kwargs):
         super().__init__(**kwargs)
+        from kivymd.uix.boxlayout import MDBoxLayout
+        from kivymd.uix.card import MDCard
+
         self.size_hint = (1, 1)
         self.anchor_y = "bottom"
         self.background_color = (0, 0, 0, 0.5)
@@ -474,6 +499,71 @@ class OptionSheet(ModalView):
         super().dismiss(*args, **kwargs)
 
 
+class TrackRow(TwoLineAvatarIconListItem):
+    """One song row, used inside the virtualized RecycleView list.
+
+    Only the rows that are visible on screen exist, so a playlist with
+    hundreds (or thousands) of songs opens instantly.
+    """
+
+    track_path = StringProperty("")
+    track_index = NumericProperty(-1)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_widget(IconLeftWidget(icon="music-note"))
+        self.add_widget(IconRightWidget(icon="dots-vertical", on_release=self._open_menu))
+        self.bind(on_release=self._play)
+
+    def _play(self, *args):
+        app = MDApp.get_running_app()
+        if app:
+            app.on_track_selected(self.track_index)
+
+    def _open_menu(self, *args):
+        app = MDApp.get_running_app()
+        if app:
+            widget = args[0] if args else self
+            app.open_track_item_menu(widget, self.track_path, self.track_index)
+
+
+class PlaylistRow(TwoLineAvatarIconListItem):
+    """One playlist folder row in the overview."""
+
+    playlist_name = StringProperty("")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_widget(IconLeftWidget(icon="playlist-play"))
+        self.add_widget(IconRightWidget(icon="dots-vertical", on_release=self._open_menu))
+        self.bind(on_release=self._open)
+
+    def _open(self, *args):
+        app = MDApp.get_running_app()
+        if app:
+            app.open_playlist_by_name(self.playlist_name)
+
+    def _open_menu(self, *args):
+        app = MDApp.get_running_app()
+        if app:
+            widget = args[0] if args else self
+            app.open_playlist_folder_menu(widget, self.playlist_name)
+
+
+class CreatePlaylistRow(TwoLineAvatarIconListItem):
+    """The '+ Create New Playlist' row at the top of the overview."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_widget(IconLeftWidget(icon="playlist-plus"))
+        self.bind(on_release=lambda *a: MDApp.get_running_app().show_create_playlist_dialog())
+
+
+Factory.register("TrackRow", cls=TrackRow)
+Factory.register("PlaylistRow", cls=PlaylistRow)
+Factory.register("CreatePlaylistRow", cls=CreatePlaylistRow)
+
+
 class ShimulAudioApp(MDApp):
     view_title = StringProperty("Playlists")
     current_title = StringProperty("No track loaded")
@@ -486,8 +576,10 @@ class ShimulAudioApp(MDApp):
     is_playing = BooleanProperty(False)
     shuffle = BooleanProperty(False)
     repeat = BooleanProperty(False)
+    startup_info = StringProperty("")
 
     def build(self):
+        _t0 = time.time()
         self.title = "Shimul Audio"
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "LightGreen"
@@ -520,25 +612,44 @@ class ShimulAudioApp(MDApp):
         self.file_manager = None
 
         self.root_widget = Builder.load_string(KV)
+        self._build_seconds = time.time() - _t0
         self.load_saved_playlists()
         Clock.schedule_interval(self.update_progress, 0.2)
         return self.root_widget
 
     def on_start(self):
-        # Draw the saved playlist right away, then look for new songs in the
-        # background. Nothing here is allowed to block the first frame.
+        # Draw the saved playlist right away; never rebuild the library on
+        # startup. The Music folder is only scanned once, on a fresh install
+        # (or when the user taps the search button).
         self.refresh_main_list()
+        self._ui_seconds = time.time() - _T_IMPORT_START
+        Clock.schedule_once(self._report_startup, 0.1)
+
+        first_run = not getattr(self, "_db_existed", False)
         if platform == "android":
             try:
                 from android.permissions import request_permissions, Permission
                 request_permissions(
                     [Permission.READ_EXTERNAL_STORAGE, Permission.READ_MEDIA_AUDIO],
-                    lambda perms, grants: self.scan_music_folder(),
+                    (lambda perms, grants: self.scan_music_folder()) if first_run else None,
                 )
             except Exception:
-                Clock.schedule_once(lambda dt: self.scan_music_folder(), 1.0)
-        else:
-            Clock.schedule_once(lambda dt: self.scan_music_folder(), 0.3)
+                if first_run:
+                    Clock.schedule_once(lambda dt: self.scan_music_folder(), 1.0)
+        elif first_run:
+            Clock.schedule_once(lambda dt: self.scan_music_folder(), 0.5)
+
+    def _report_startup(self, dt):
+        """Show how long startup took (temporary diagnostic line)."""
+        total = time.time() - _T_IMPORT_START
+        self.startup_info = (
+            f"import {_T_IMPORT_END - _T_IMPORT_START:.1f}s | "
+            f"build {getattr(self, '_build_seconds', 0):.1f}s | "
+            f"ui {getattr(self, '_ui_seconds', 0):.1f}s | "
+            f"list {getattr(self, '_first_list_seconds', 0):.1f}s | "
+            f"total {total:.1f}s"
+        )
+        Clock.schedule_once(lambda dt: setattr(self, "startup_info", ""), 25)
 
     # ---------- Persistent JSON Storage for Playlists ----------
     def get_db_path(self):
@@ -547,7 +658,11 @@ class ShimulAudioApp(MDApp):
 
     def load_saved_playlists(self):
         path = self.get_db_path()
-        if os.path.exists(path):
+        # A missing database means a fresh install: scan the Music folder
+        # once. Afterwards the saved paths are the single source of truth,
+        # so the folder is never rescanned automatically.
+        self._db_existed = os.path.exists(path)
+        if self._db_existed:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -587,32 +702,20 @@ class ShimulAudioApp(MDApp):
         """Displays all Playlist folders (like Image 2/4 in your screenshots)."""
         self.showing_overview = True
         self.view_title = "Playlists"
-        container = self.root_widget.ids.playlist_container
-        container.clear_widgets()
 
-        # 1. Button at top to create a new playlist
-        create_item = TwoLineAvatarIconListItem(
-            text="+ Create New Playlist",
-            secondary_text="Tap to create a custom playlist",
-            on_release=lambda x: self.show_create_playlist_dialog()
-        )
-        create_item.add_widget(IconLeftWidget(icon="playlist-plus"))
-        container.add_widget(create_item)
-
-        # 2. List all existing playlists
+        data = [{
+            "viewclass": "CreatePlaylistRow",
+            "text": "+ Create New Playlist",
+            "secondary_text": "Tap to create a custom playlist",
+        }]
         for pl_name, tracks in self.playlists_db.items():
-            item = TwoLineAvatarIconListItem(
-                text=pl_name,
-                secondary_text=f"{len(tracks)} songs",
-                on_release=lambda x, name=pl_name: self.open_playlist_by_name(name)
-            )
-            item.add_widget(IconLeftWidget(icon="playlist-play"))
-            right_btn = IconRightWidget(
-                icon="dots-vertical",
-                on_release=lambda btn, name=pl_name: self.open_playlist_folder_menu(btn, name)
-            )
-            item.add_widget(right_btn)
-            container.add_widget(item)
+            data.append({
+                "viewclass": "PlaylistRow",
+                "text": pl_name,
+                "secondary_text": f"{len(tracks)} songs",
+                "playlist_name": pl_name,
+            })
+        self.root_widget.ids.playlist_rv.data = data
 
     def open_playlist_by_name(self, name):
         """Opens a specific playlist and shows its tracks."""
@@ -630,41 +733,29 @@ class ShimulAudioApp(MDApp):
             return
 
         self.view_title = f"{self.active_playlist_name} ({len(self.playlist)})"
-        container = self.root_widget.ids.playlist_container
-        container.clear_widgets()
-
-        # Add the rows in small batches. Building hundreds of list items at
-        # once froze the app for several seconds on phones.
-        self._list_generation = getattr(self, "_list_generation", 0) + 1
-        generation = self._list_generation
-        tracks = list(self.playlist)
         playlist_name = self.active_playlist_name
 
-        def add_chunk(start=0):
-            if generation != self._list_generation:
-                return
-            end = min(start + 25, len(tracks))
-            for idx in range(start, end):
-                p = tracks[idx]
-                item = TwoLineAvatarIconListItem(
-                    text=os.path.basename(p),
-                    secondary_text=f"Playlist: {playlist_name}  •  Tap 3-dots to add/manage",
-                    on_release=lambda x, i=idx: self.on_track_selected(i)
-                )
-                item.add_widget(IconLeftWidget(icon="music-note"))
-                right_btn = IconRightWidget(
-                    icon="dots-vertical",
-                    on_release=lambda btn, path=p, i=idx: self.open_track_item_menu(btn, path, i)
-                )
-                item.add_widget(right_btn)
-                container.add_widget(item)
-            if end < len(tracks):
-                Clock.schedule_once(lambda dt: add_chunk(end), 0)
-
-        add_chunk()
+        # Hand the rows to the RecycleView instead of creating one widget per
+        # song: it only builds the few rows that are actually visible, so a
+        # playlist with 400+ tracks opens immediately.
+        self.root_widget.ids.playlist_rv.data = [
+            {
+                "viewclass": "TrackRow",
+                "text": os.path.basename(p),
+                "secondary_text": f"Playlist: {playlist_name}  •  Tap 3-dots to add/manage",
+                "track_path": p,
+                "track_index": idx,
+            }
+            for idx, p in enumerate(self.playlist)
+        ]
+        self._first_list_seconds = time.time() - _T_IMPORT_START
 
     # ---------- Create / Manage Playlists Dialogs & Menus ----------
     def show_create_playlist_dialog(self, track_to_add=None):
+        from kivymd.uix.dialog import MDDialog
+        from kivymd.uix.button import MDFlatButton, MDRaisedButton
+        from kivymd.uix.textfield import MDTextField
+
         self.new_pl_input = MDTextField(
             hint_text="Enter playlist name (e.g., Favorites, Workout)",
             mode="rectangle"
@@ -870,6 +961,8 @@ class ShimulAudioApp(MDApp):
     # ---------- File & Folder Loading ----------
     def open_file_manager(self):
         if self.file_manager is None:
+            from kivymd.uix.filemanager import MDFileManager
+
             self.file_manager = MDFileManager(
                 exit_manager=self.close_file_manager,
                 select_path=self.select_path,
@@ -939,8 +1032,6 @@ class ShimulAudioApp(MDApp):
         self.save_playlists()
         if target_pl == self.active_playlist_name and not self.showing_overview:
             self.playlist = list(self.playlists_db[target_pl])
-            if self.current_index < 0:
-                self.load_track(0, autoplay=False)
             self.refresh_main_list()
         toast(f"Added {added} song(s) from Music")
 
@@ -983,9 +1074,29 @@ class ShimulAudioApp(MDApp):
         except Exception:
             return 240.0
 
-    def load_track(self, index, autoplay=True):
-        if not (0 <= index < len(self.playlist)):
+    def load_track(self, index, autoplay=True, direction=1):
+        if not self.playlist:
             return
+        total = len(self.playlist)
+        index = index % total
+
+        # The playlist only stores file paths, so the file may have been
+        # deleted or moved since it was added. Tell the user once and move on
+        # to the next (or previous) song instead of failing silently.
+        skipped = 0
+        while not os.path.isfile(self.playlist[index]):
+            skipped += 1
+            if skipped >= total:
+                toast("No playable files in this playlist")
+                self.is_playing = False
+                self.paused = True
+                self.current_title = "No track loaded"
+                self.current_artist = "All files are missing"
+                return
+            if skipped == 1:
+                toast(f"File not found, skipping: {os.path.basename(self.playlist[index])}")
+            index = (index + direction) % total
+
         self.current_index = index
         path = self.playlist[index]
 
@@ -1126,7 +1237,7 @@ class ShimulAudioApp(MDApp):
         if not self.playlist:
             return
         new_idx = (self.current_index - 1) % len(self.playlist)
-        self.load_track(new_idx, autoplay=True)
+        self.load_track(new_idx, autoplay=True, direction=-1)
 
     def next_track(self):
         if not self.playlist:
